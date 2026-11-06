@@ -12,9 +12,11 @@ const modalAccept = document.getElementById('modal-accept');
 const notificationStatus = document.getElementById('notification-status');
 const hasAudioSource = Boolean(audio && audio.getAttribute('src'));
 
-// FormSubmit отправляет уведомление на почту без собственного сервера.
-// При первом использовании сервис пришлёт письмо для активации адреса.
-const FORM_ENDPOINT = 'https://formsubmit.co/ajax/vladbudr@yandex.ru';
+// Web3Forms принимает отправки с публичного статического сайта (GitHub Pages).
+// Access Key специально предназначен для размещения во фронтенд-коде.
+const WEB3FORMS_ENDPOINT = 'https://api.web3forms.com/submit';
+const WEB3FORMS_ACCESS_KEY = '750a9ca1-ae59-4077-97c7-888461937cfc';
+const NOTIFICATION_EMAIL = 'vladbudr@yandex.ru';
 let selectedCoupon = null;
 let isSendingGift = false;
 
@@ -190,19 +192,36 @@ async function sendGiftNotification(coupon) {
     dateStyle: 'long',
     timeStyle: 'short'
   });
+  const message = [
+    'Она выбрала подарок на годовщину ♥',
+    '',
+    `Подарок: ${coupon.title}`,
+    `Купон: ${coupon.eyebrow}`,
+    `Описание: ${coupon.description}`,
+    `Время выбора: ${submittedAt}`,
+    `Страница: ${window.location.href}`
+  ].join('\n');
+
+  // Web3Forms ожидает access_key и данные формы. Поле email здесь указывает
+  // адрес для ответа на уведомление; само письмо направляется на почту,
+  // привязанную к этому Access Key в Web3Forms.
   const payload = {
+    access_key: WEB3FORMS_ACCESS_KEY,
     name: 'Выбор подарка на годовщину',
+    email: NOTIFICATION_EMAIL,
+    message,
+    subject: `Она выбрала подарок: ${coupon.title} ♥`,
+    from_name: 'Наш юбилейный сайт',
     gift: coupon.title,
     coupon: coupon.eyebrow,
     details: coupon.description,
     submitted_at: submittedAt,
     page: window.location.href,
-    _subject: `Она выбрала подарок: ${coupon.title} ♥`,
-    _template: 'table'
+    botcheck: ''
   };
 
   try {
-    const response = await fetch(FORM_ENDPOINT, {
+    const response = await fetch(WEB3FORMS_ENDPOINT, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -212,14 +231,20 @@ async function sendGiftNotification(coupon) {
     });
 
     let result = {};
+    const responseText = await response.text();
     try {
-      result = await response.json();
+      result = responseText ? JSON.parse(responseText) : {};
     } catch (_) {
-      // Если сервис вернул не JSON, ниже покажем общую ошибку по HTTP-статусу.
+      result = { message: responseText };
     }
 
-    if (!response.ok || result.success === false || result.success === 'false') {
-      throw new Error(result.message || `HTTP ${response.status}`);
+    // Web3Forms подтверждает успешную обработку полем success: true.
+    if (!response.ok || result.success !== true) {
+      const apiMessage = result.error || result.message || result.body?.message;
+      const error = new Error(apiMessage || `Web3Forms вернул HTTP ${response.status}`);
+      error.status = response.status;
+      error.apiCode = result.code || result.error_code || '';
+      throw error;
     }
 
     notificationStatus.textContent = 'Готово! Твой выбор отправлен. ♥';
@@ -231,8 +256,23 @@ async function sendGiftNotification(coupon) {
       if (cue && button.dataset.coupon === coupon.key) cue.textContent = 'ВЫБРАНО ♥';
     });
   } catch (error) {
-    console.error('Не удалось отправить уведомление о подарке:', error);
-    notificationStatus.textContent = 'Не получилось отправить письмо. Проверь интернет и попробуй ещё раз.';
+    console.error('Не удалось отправить уведомление о подарке через Web3Forms:', error);
+    const reason = String(error && error.message ? error.message : error);
+    const lowerReason = reason.toLowerCase();
+
+    if (error instanceof TypeError || lowerReason.includes('failed to fetch') || lowerReason.includes('networkerror')) {
+      notificationStatus.textContent = 'Не удалось связаться с Web3Forms. Проверь интернет и попробуй ещё раз.';
+    } else if (lowerReason.includes('invalid') && (lowerReason.includes('key') || lowerReason.includes('access'))) {
+      notificationStatus.textContent = 'Web3Forms не принял Access Key. Проверь, что в проект вставлен ключ из твоей формы Web3Forms.';
+    } else if (lowerReason.includes('domain') && (lowerReason.includes('allow') || lowerReason.includes('restrict'))) {
+      notificationStatus.textContent = 'Web3Forms отклонил домен сайта. Проверь настройки формы и разрешённые домены в Web3Forms.';
+    } else if (error.status === 429 || lowerReason.includes('too many requests') || lowerReason.includes('rate limit')) {
+      notificationStatus.textContent = 'Слишком много попыток подряд. Подожди немного и попробуй ещё раз.';
+    } else if (lowerReason.includes('quota') || lowerReason.includes('limit exceeded')) {
+      notificationStatus.textContent = 'У формы Web3Forms закончился лимит отправок. Проверь лимит в личном кабинете сервиса.';
+    } else {
+      notificationStatus.textContent = `Web3Forms не отправил письмо: ${reason}`;
+    }
     notificationStatus.className = 'notification-status is-error';
     modalAccept.disabled = false;
     modalAccept.textContent = 'Повторить отправку';
